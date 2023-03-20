@@ -1,0 +1,154 @@
+---
+title: "XGBoost"
+author: "VDOT team 2"
+date: "2022/5/5"
+output: html_document
+---
+```{r}
+rm(list = ls())
+library(dplyr)
+library(tidyr)
+library(xgboost)
+library(caret)
+```
+
+##### Loading Dataset #####
+```{r pressure, echo=FALSE}
+#Read in Data
+data <- read.csv('HistoricalData.csv', header = TRUE, stringsAsFactors = TRUE)
+
+#Aggregate Data by Hour
+data <- data %>% 
+  group_by(Date) %>% 
+  summarise(Hour = NULL,
+            TOTAL = sum(TOTAL),
+            TRAILER = sum(TRAILER),
+            BUS = sum(BUS),
+            TRUCK = sum(TRUCK),
+            PED.BYC = sum(PED.BYC),
+            LOD = sum(LOD),
+            Month = first(Month),
+            Day = first(Day),
+            Year = first(Year),
+            Week.Number = first(Week.Number),
+            Day.of.Week = first(Day.of.Week),
+            WeekDay = first(WeekDay),
+            CountWeekDay = first(CountWeekDay),
+            Holiday = first(Holiday),
+            temp = first(temp),
+            precip = first(precip),
+            snow = first(snow),
+            windspeed = first(windspeed),
+            SchoolEvent = first(SchoolEvent),
+            Rush = first(Rush),
+            covid = first(covid))
+
+data <- subset(data, select=-c(Date,TRAILER,BUS,TRUCK,PED.BYC,LOD,Rush,CountWeekDay,SchoolEvent)) #Remove non-predictor columns
+
+#Convert Datatype
+data$Month <- as.character(data$Month)
+data$Day <- as.character(data$Day)
+data$Week.Number <- as.character(data$Week.Number)
+data$Day.of.Week <- as.character(data$Day.of.Week)
+#data$CountWeekDay <- as.character(data$CountWeekDay)
+
+data$Holiday <- as.character(data$Holiday)
+#data$SchoolEvent <- as.factor(data$SchoolEvent)
+#data$Rush <- as.factor(data$Rush)
+data$covid <- as.factor(data$covid)
+
+#Randomly Sample Data (80/20)
+trainIndex = sample(1:nrow(data), size = nrow(data)*0.8)
+
+#Define Train Set
+train.x <- data[trainIndex, -1] #Create train set, remove target variable
+train.y <- data$TOTAL[trainIndex]
+train.x = data.matrix(train.x) #Convert from DF to matrix
+xgb_train = xgb.DMatrix(data = train.x, label = train.y)
+
+#Define Test Set
+test.x <- data[-trainIndex, -1] #Create test set, remove target variable
+test.y <- data$TOTAL[-trainIndex]
+test.x = data.matrix(test.x)  #Convert from DF to matrix
+xgb_test = xgb.DMatrix(data = test.x, label = test.y)
+
+```
+
+### XGBoost Model ###
+```{r}
+set.seed(4)
+
+#Cross Validation
+model <- xgb.cv(eval_metric = "mae",
+              max_depth = 4,
+              data = xgb_train,
+              nrounds = 100,
+              watchlist = list(train=xgb_train, test=xgb_test),
+              maximize = FALSE,
+              nfold = 3,
+              early_stopping_rounds = 10,
+              print_every_n = 1,
+              verbose = 0)
+bestRound <- which.min(model$evaluation_log$test_mae_mean)
+
+#Train
+model <- xgb.train(eval_metric = "mae",
+                   max_depth = 4,
+                   data = xgb_train, 
+                   nrounds = bestRound, 
+                   watchlist= list(train=xgb_train, test=xgb_test),
+                   verbose = 0)
+mae <- min(model$evaluation_log$test_mae)
+```
+
+### Importance Table and Plot
+```{r}
+importance_matrix <- xgb.importance(model = model)
+print(importance_matrix)
+xgb.plot.importance(importance_matrix = importance_matrix)
+
+#Original Plot showed 0 for School Event and snow so took those out
+#Rush hour is already included in Hour so can take that out too
+
+#Temperature and Week Number correlated with Month
+#Day of Week and Week Day are the same thing
+```
+
+
+
+
+### Predict by Hour on New Dates ### 
+```{r}
+newdata <- read.csv("PredictiveData.csv")
+
+#Aggregate Data by Hour
+newdata <- newdata %>% 
+  group_by(Date) %>% 
+  summarise(Month = first(Month),
+            Day = first(Day),
+            Year = first(Year),
+            Week.Number = first(Week.Number),
+            Day.of.Week = first(Day.of.Week),
+            WeekDay = first(WeekDay),
+            CountWeekDay = first(CountWeekDay),
+            Holiday = first(Holiday),
+            temp = first(temp),
+            precip = first(precip),
+            snow = first(snow),
+            windspeed = first(windspeed),
+            covid = first(covid))
+
+predictions <- subset(newdata, select=c(Date))
+newdata <- subset(newdata, select=-c(Date,CountWeekDay))
+newdata <- data.matrix(newdata, rownames.force = NA)
+
+predictions["TOTAL_Day_Predict"] <- predict(model, newdata = newdata)
+
+#Turn negative numbers to 0
+predictions$TOTAL_Day_Predict[predictions$TOTAL_Day_Predict < 0] <- 0
+
+#Round predictions up
+predictions$TOTAL_Day_Predict <- round(predictions$TOTAL_Day_Predict, digits = 0)
+
+```
+
